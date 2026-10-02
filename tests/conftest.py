@@ -37,6 +37,7 @@ def app(tmp_path):
             "TESTING": True,
             "SECRET_KEY": "test-secret",
             "SQLALCHEMY_DATABASE_URI": f"sqlite:///{tmp_path / 'test.db'}",
+            "LOCAL_UPLOADS": True,
             "UPLOAD_DIR": str(tmp_path / "uploads"),
             "SESSION_COOKIE_SECURE": False,
             # Never reach a real Cloudinary account from tests, even if the shell has these set.

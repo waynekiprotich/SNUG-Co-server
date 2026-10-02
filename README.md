@@ -68,7 +68,7 @@ Checklist:
 - `SECRET_KEY` is set to a long random value and never committed. Changing it signs everyone out.
 - `FLASK_DEBUG` is `0` (or unset). Cookies are then marked `Secure`, so the site must use HTTPS.
 - The proxy passes the original `Host` header. The admin API rejects requests whose `Origin` doesn't match it (or an address in `ALLOWED_ORIGINS`). Set `TRUSTED_PROXIES=1` if the proxy sets `X-Forwarded-*` headers.
-- `UPLOAD_DIR` points to a disk that survives redeploys, and it is backed up — or set `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` to skip local disk entirely (see below). Uploaded photos are files, not database rows.
+- `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` and `CLOUDINARY_API_SECRET` are set (see below). Photos are never written to the server's disk in production: without Cloudinary, photo uploads are refused with a 503.
 - For PostgreSQL, install `requirements-postgres.txt` and set `DATABASE_URL`.
 - Build the client with `VITE_API_URL` pointing at this API, then run `flask db upgrade` after every schema change.
 - Add rate limiting to `/api/admin/login` at the proxy as well. The app's own limit (5 wrong tries per 15 minutes per address and email) resets on restart and isn't shared between workers.
@@ -80,7 +80,7 @@ If the client is a separate app (its own repo, its own host — Vercel, Netlify,
 - Recommended: let the client's host proxy `/api` and `/uploads` to this server (`client/vercel.json` does this) and build the client with `VITE_API_URL=/api`. The sign-in cookie is then first-party, so browsers that block third-party cookies (Safari, Brave) still work.
 - Set `ALLOWED_ORIGINS` to the client's exact origin(s), e.g. `https://snug-co-client.vercel.app`. The admin rejects change requests from any other origin, and CORS headers are sent only to these.
 - Only if the browser calls this API's own domain directly (no proxy): set `SESSION_COOKIE_SAMESITE=None` and `VITE_API_URL` to the full API address. Both sites must use HTTPS.
-- Photos need a store reachable by URL regardless of which host serves them — see Supabase Storage below. A local disk only serves photos on the same host that saved them.
+- Photos are served by Cloudinary's CDN straight from its own URLs, so it does not matter which host serves the site.
 
 ## Storing photos: Cloudinary
 
@@ -92,9 +92,11 @@ https://res.cloudinary.com/<cloud>/image/private/c_crop,h_1500,w_1200,x_0,y_120/
 
 The API sends that URL with `{w}` left in; the client fills in the widths for its `srcset`. Every new upload gets a new public ID and the version is in the URL, so CDN copies are cached for good and never go stale. Deleting a photo in the admin deletes the Cloudinary asset (with a CDN purge) unless another row still uses it.
 
-Without the Cloudinary variables, photos are written at a few WebP widths to Supabase Storage (`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`) or else local disk, as before Cloudinary.
+Cloudinary is the only photo store in production. Without the Cloudinary variables, uploads fail with a clear 503 rather than falling back to the server's disk. Local-disk storage exists only for development: it turns on with `FLASK_DEBUG=1` so you can work without a Cloudinary account (files go to `UPLOAD_DIR`, served from `/uploads`; in production `/uploads` returns 404). A fresh deployment needs no `SUPABASE_*` variables at all.
 
-### Moving existing photos
+### Legacy: moving photos stored before Cloudinary
+
+Only needed when carrying over an older database. A fresh deployment skips this. These commands live in `app/legacy.py` and read `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` and `SUPABASE_BUCKET` directly from the environment; the running API never uses them.
 
 ```bash
 export FLASK_APP=wsgi.py
@@ -105,7 +107,7 @@ flask migrate-images-to-cloudinary               # the rest
 
 It copies the largest stored size of each photo (Supabase Storage, local disk, or the client's bundled files via `--client-dir`) into Cloudinary, checks that a resized copy is served, then saves the asset details on that row only. It never deletes anything and never overwrites an asset, so it can be stopped and re-run: finished photos are skipped and a half-finished one reuses its existing asset. The old `is_upload`/`widths` columns are kept.
 
-**Rollback:** set `IMAGE_DELIVERY=legacy` and the API serves the old Supabase/bundled copies again for every photo that has one (photos uploaded after the switch only exist in Cloudinary). Unset the three Cloudinary variables to send new uploads back to Supabase Storage. While Cloudinary is on, Supabase Storage files are never deleted.
+**Rollback:** set `IMAGE_DELIVERY=legacy` and the API serves the old Supabase/bundled copies again for every photo that has one (photos uploaded after the switch only exist in Cloudinary). While Cloudinary is on, photos stored before it are never deleted.
 
 ## Wishlist and cart
 
@@ -144,13 +146,41 @@ Writes need `X-Requested-With: snug-shop` (and an allowed `Origin`), like the ad
 | `app/routes/auth.py` | Sign in, sign out and change password |
 | `app/routes/admin.py` | Product, photo, category and collection endpoints |
 | `app/validation.py` | Input checks, with a message for each field |
-| `app/images.py` | Photo cropping, resizing and storage |
-| `app/cli.py` | `seed`, `create-admin`, `reset-password`, `import-bundled-photos` |
+| `app/images.py` | Photo cropping and Cloudinary storage (local disk for development) |
+| `app/cli.py` | `seed`, `create-admin`, `reset-password` |
+| `app/legacy.py` | Old Supabase Storage photos: `import-bundled-photos`, `migrate-images-to-cloudinary` |
 | `migrations/` | Database migrations |
 | `seed/catalog.json` | Starter catalog loaded by `flask seed` |
 
-## Production on Render (one service, one domain)
+## Production: Vercel + Render + Supabase + Cloudinary
 
-`render.yaml` at the repo root builds the React site, installs the server, runs `flask db upgrade`, and starts gunicorn. Flask serves the built site, `/api`, and page routes (direct links work). After the first deploy, set `VITE_WHATSAPP_NUMBER`, `VITE_SITE_URL` and `VITE_GOOGLE_SITE_VERIFICATION` in the Render dashboard, redeploy, then run `flask seed` and `flask create-admin` in the Render shell.
+```
+Browser -> Vercel (React site) -> /api rewrite -> https://snug-co-api.onrender.com/api -> Flask
+```
 
-Uploaded photos are saved to a 1 GB Render disk mounted at `/var/data` (`UPLOAD_DIR=/var/data/uploads`) and served from `/uploads`. Turn on Cloudflare's proxy for the domain so photos are cached near customers; they are sent with a one-year cache header.
+- **Render** runs this server only (`gunicorn wsgi:app`). Run `flask db upgrade` before each deploy (a Render pre-deploy command works).
+- **Supabase** is the PostgreSQL database only, through `DATABASE_URL`. A new database starts empty: no products, categories, shoppers or settings. `flask seed` is optional and is not part of a clean start.
+- **Cloudinary** stores every product photo under `snug-co/products`.
+- **Vercel** serves the site and proxies `/api/*` to Render (`client/vercel.json`), so the browser only talks to the site's own domain and the admin cookie stays first-party.
+
+Environment variables on Render:
+
+| Variable | Value |
+| --- | --- |
+| `SECRET_KEY` | long random value |
+| `DATABASE_URL` | the Supabase PostgreSQL connection string |
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | from the Cloudinary console |
+| `IMAGE_DELIVERY` | `cloudinary` |
+| `ALLOWED_ORIGINS` | the site's exact origin(s), e.g. `https://www.snugandco.co.ke`. Needed because Vercel forwards the browser's `Origin` but Render sees its own host. |
+| `TRUSTED_PROXIES` | `1` |
+| `SITE_URL` | the public site address, for the sitemap |
+
+Leave `FLASK_DEBUG` unset. Do not set `UPLOAD_DIR`, `UPLOAD_URL_BASE` or any `SUPABASE_*` variable.
+
+After the first deploy, create the first admin from the Render shell (it prompts for the password, which is never stored in git or the environment):
+
+```bash
+cd server && FLASK_APP=wsgi.py flask create-admin --email you@example.com
+```
+
+Then sign in at `/admin`, add categories (a product needs one), then products and photos.

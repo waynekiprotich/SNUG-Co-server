@@ -25,30 +25,23 @@ def build_config(overrides=None):
     # Set to None only if the admin calls this API cross-site (needs HTTPS).
     samesite = env("SESSION_COOKIE_SAMESITE") or "Lax"
 
-    supabase_url = env("SUPABASE_URL") or ""
-    supabase_key = env("SUPABASE_SERVICE_KEY") or ""
-    supabase_bucket = env("SUPABASE_BUCKET") or "product-photos"
-    upload_url_base = env("UPLOAD_URL_BASE")
-    if supabase_url and supabase_key and not upload_url_base:
-        upload_url_base = f"{supabase_url.rstrip('/')}/storage/v1/object/public/{supabase_bucket}"
-
     config = {
         "SITE_URL": env("SITE_URL") or env("VITE_SITE_URL") or "",
         "SECRET_KEY": env("SECRET_KEY"),
         "DEBUG": debug,
         "SQLALCHEMY_DATABASE_URI": _database_uri(env("DATABASE_URL")),
+        # Local-disk photos are for development only (FLASK_DEBUG=1). In production, photos go
+        # to Cloudinary, and uploads fail with a clear error if it isn't configured.
+        "LOCAL_UPLOADS": debug,
         "UPLOAD_DIR": upload_dir,
         "CLIENT_DIST": env("CLIENT_DIST") or str(BASE_DIR.parent / "client" / "dist"),
-        "UPLOAD_URL_BASE": (upload_url_base or "/uploads").rstrip("/"),
-        "SUPABASE_URL": supabase_url,
-        "SUPABASE_SERVICE_KEY": supabase_key,
-        "SUPABASE_BUCKET": supabase_bucket,
+        "UPLOAD_URL_BASE": (env("UPLOAD_URL_BASE") or "/uploads").rstrip("/"),
         # Cloudinary. The cloud name is public (it's in every image URL); the key and secret
         # stay on the server and are only needed for uploads, deletes and the migration.
         "CLOUDINARY_CLOUD_NAME": env("CLOUDINARY_CLOUD_NAME") or "",
         "CLOUDINARY_API_KEY": env("CLOUDINARY_API_KEY") or "",
         "CLOUDINARY_API_SECRET": env("CLOUDINARY_API_SECRET") or "",
-        # "legacy" serves photos from Supabase Storage / bundled files again (rollback switch).
+        # "legacy" serves photos stored before Cloudinary (local files, bundled files) again.
         "IMAGE_DELIVERY": (env("IMAGE_DELIVERY") or "cloudinary").lower(),
         # Photo uploads raise this to MAX_UPLOAD_REQUEST_BYTES.
         "MAX_CONTENT_LENGTH": 64 * 1024,

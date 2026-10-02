@@ -5,7 +5,7 @@ from sqlalchemy import func
 
 from ..errors import ApiError, ValidationError
 from ..extensions import db
-from ..images import PRODUCT_FOLDER, cloudinary_storage, crop_box, get_storage, new_image_id, open_image, process_image
+from ..images import PRODUCT_FOLDER, cloudinary_storage, crop_box, local_storage, new_image_id, open_image, process_image
 from ..models import Category, Collection, Product, ProductImage, SiteSettings, with_relations
 from ..security import login_required
 from ..serializers import SETTINGS_IMAGES, image_registry, product_json, settings_json, taxonomy_json
@@ -112,7 +112,7 @@ def remove_stored_files(photos):
     """Run after the delete is committed, so a failure here never leaves a broken row.
 
     Cloudinary assets are deleted unless another photo still uses them. While Cloudinary is
-    on, Supabase Storage files are left alone: they're the rollback copy.
+    on, photos stored before it are left alone: they're the rollback copy.
     """
     cloud = cloudinary_storage(current_app)
     public_ids = {p.public_id for p in photos if p.public_id}
@@ -128,8 +128,8 @@ def remove_stored_files(photos):
                 current_app.logger.warning("Cloudinary isn’t configured; %s was not deleted.", public_id)
             else:
                 cloud.destroy(public_id)
-    if cloud is None:
-        storage = get_storage(current_app)
+    storage = local_storage(current_app) if cloud is None else None
+    if storage:
         for photo in photos:
             if photo.is_upload and photo.widths:
                 storage.delete(photo.id, photo.widths)
@@ -247,6 +247,10 @@ def upload_images(product_id):
         focus = 0.4
 
     cloud = cloudinary_storage(current_app)
+    storage = None if cloud else local_storage(current_app)
+    if not cloud and not storage:
+        current_app.logger.error("Photo upload refused: CLOUDINARY_* is not set.")
+        raise ApiError(503, "Photo storage isn’t set up yet. Ask the site owner to connect Cloudinary.")
     max_bytes = current_app.config["MAX_UPLOAD_BYTES"]
     prepared = []
     # Check every file before storing any, so a bad one in a batch saves nothing.
@@ -269,7 +273,6 @@ def upload_images(product_id):
     if cloud:
         save_to_cloudinary(cloud, product, prepared, position)
     else:
-        storage = get_storage(current_app)
         for widths, blobs in prepared:
             image_id = new_image_id()
             storage.save(image_id, blobs)

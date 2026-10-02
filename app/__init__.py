@@ -37,7 +37,8 @@ def create_app(test_config=None):
         n = app.config["TRUSTED_PROXIES"]
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=n, x_proto=n, x_host=n)
 
-    Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
+    if app.config["LOCAL_UPLOADS"]:
+        Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
     db.init_app(app)
     migrate.init_app(app, db, render_as_batch=True, compare_type=True)
     register_errors(app)
@@ -59,7 +60,7 @@ def create_app(test_config=None):
 
     @app.get("/uploads/<path:filename>")
     def uploads(filename):
-        if not filename.endswith(".webp"):
+        if not app.config["LOCAL_UPLOADS"] or not filename.endswith(".webp"):
             abort(404)
         response = send_from_directory(app.config["UPLOAD_DIR"], filename, max_age=31536000)
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"

@@ -1,4 +1,4 @@
-"""Photo processing and storage."""
+"""Photo processing and storage: Cloudinary in production, local disk for development."""
 
 import io
 import os
@@ -124,63 +124,6 @@ def _ssl_context():
     return ssl.create_default_context(cafile=certifi.where())
 
 
-class SupabaseStorage:
-    """Photos in a Supabase Storage bucket."""
-
-    def __init__(self, url, service_key, bucket):
-        self.base = f"{url.rstrip('/')}/storage/v1"
-        self.headers = {"Authorization": f"Bearer {service_key}", "apikey": service_key}
-        self.bucket = bucket
-
-    @staticmethod
-    def filename(image_id, width):
-        return f"{image_id}-{width}.webp"
-
-    def save(self, image_id, files):
-        import urllib.error
-        import urllib.request
-
-        written = []
-        try:
-            for width, blob in files.items():
-                req = urllib.request.Request(
-                    f"{self.base}/object/{self.bucket}/{self.filename(image_id, width)}",
-                    data=blob,
-                    method="POST",
-                    headers={
-                        **self.headers,
-                        "Content-Type": "image/webp",
-                        "x-upsert": "true",
-                        # Names are never reused, so cache for a year.
-                        "cache-control": "max-age=31536000",
-                    },
-                )
-                urllib.request.urlopen(req, timeout=20, context=_ssl_context())
-                written.append(width)
-        except (urllib.error.URLError, OSError) as err:
-            from flask import current_app
-
-            detail = err.read().decode(errors="replace")[:200] if isinstance(err, urllib.error.HTTPError) else err
-            current_app.logger.error("Supabase Storage upload failed: %s", detail)
-            self.delete(image_id, written)
-            raise ApiError(502, "The photo couldn’t be uploaded. Try again.")
-
-    def delete(self, image_id, widths):
-        import urllib.error
-        import urllib.request
-
-        for width in widths or []:
-            req = urllib.request.Request(
-                f"{self.base}/object/{self.bucket}/{self.filename(image_id, width)}",
-                method="DELETE",
-                headers=self.headers,
-            )
-            try:
-                urllib.request.urlopen(req, timeout=20, context=_ssl_context())
-            except (urllib.error.URLError, OSError):
-                pass
-
-
 # Cloudinary layout: snug-co/products, snug-co/categories, snug-co/homepage.
 # Covers and homepage photos are picked from product photos, so only products is used today.
 CLOUDINARY_ROOT = "snug-co"
@@ -282,9 +225,11 @@ def check_delivery(url):
         return False
 
 
-def get_storage(app):
-    """Storage used before Cloudinary: Supabase Storage, else local disk."""
-    url, key, bucket = app.config["SUPABASE_URL"], app.config["SUPABASE_SERVICE_KEY"], app.config["SUPABASE_BUCKET"]
-    if url and key:
-        return SupabaseStorage(url, key, bucket)
-    return LocalStorage(app.config["UPLOAD_DIR"])
+def local_storage(app):
+    """Local-disk photo storage for development, or None when it is off.
+
+    Production never writes photos to the server's disk: Cloudinary is the only store.
+    """
+    if app.config["LOCAL_UPLOADS"]:
+        return LocalStorage(app.config["UPLOAD_DIR"])
+    return None

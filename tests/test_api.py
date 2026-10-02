@@ -326,7 +326,7 @@ def test_sitemap_and_robots(client):
 def test_supabase_storage_verifies_ssl_and_sends_expected_request(monkeypatch):
     import ssl
 
-    from app.images import SupabaseStorage
+    from app.legacy import SupabaseStorage
 
     calls = []
     monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None, context=None: calls.append((req, context)))
@@ -345,7 +345,7 @@ def test_import_bundled_photos_resumes_without_duplicates(app, tmp_path, monkeyp
     import json
 
     from app.extensions import db
-    from app.images import SupabaseStorage
+    from app.legacy import SupabaseStorage
     from app.models import ProductImage
 
     with app.app_context():
@@ -373,7 +373,7 @@ def test_import_bundled_photos_resumes_without_duplicates(app, tmp_path, monkeyp
         def save(self, image_id, files):
             saved.append(image_id)
 
-    monkeypatch.setattr("app.images.get_storage", lambda _app: FakeStorage())
+    monkeypatch.setattr("app.legacy.supabase_storage", lambda: FakeStorage())
     runner = app.test_cli_runner()
     for _ in range(2):
         result = runner.invoke(args=["import-bundled-photos", "--client-dir", str(client)])
