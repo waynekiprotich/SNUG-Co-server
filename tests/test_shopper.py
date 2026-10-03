@@ -7,6 +7,7 @@ import pytest
 from conftest import ADMIN_EMAIL, ADMIN_PASSWORD, HEADERS, NEW_PRODUCT, PROD_SECRET
 
 SHOP = {"X-Requested-With": "snug-shop"}
+EMPTY = {"wishlist": [], "cart": [], "products": {}}
 
 
 def public_id(client, slug):
@@ -42,7 +43,7 @@ def full_line(product, quantity=1):
 
 def test_new_visitor_has_an_empty_wishlist_and_cart(client):
     res = client.get("/api/shopper")
-    assert res.get_json() == {"wishlist": [], "cart": []}
+    assert res.get_json() == EMPTY
     assert "no-store" in res.headers["Cache-Control"]
     assert "Set-Cookie" not in res.headers
 
@@ -133,7 +134,8 @@ def test_update_remove_and_clear_cart_lines(shopper):
     assert [line["key"] for line in left] == [second]
     client.put(f"/api/shopper/wishlist/{sized['id']}", headers=SHOP)
     cleared = client.delete("/api/shopper/cart", headers=SHOP).get_json()
-    assert cleared == {"wishlist": [sized["id"]], "cart": []}
+    assert cleared["wishlist"] == [sized["id"]] and cleared["cart"] == []
+    assert list(cleared["products"]) == [sized["id"]]
 
 
 def test_unavailable_pieces_can_be_saved_but_not_added(admin):
@@ -166,7 +168,7 @@ def test_writes_need_the_shop_header_and_a_known_origin(shopper):
 def test_tampered_cookie_is_ignored(shopper):
     client, sized, _, _ = shopper
     client.set_cookie("snug_shopper", '{"w":[1,2,3]}', path="/api/shopper")
-    assert client.get("/api/shopper").get_json() == {"wishlist": [], "cart": []}
+    assert client.get("/api/shopper").get_json() == EMPTY
     assert client.put(f"/api/shopper/wishlist/{sized['id']}", headers=SHOP).status_code == 200
 
 
@@ -238,14 +240,14 @@ def test_returning_visitor_gets_the_same_wishlist_and_cart_on_a_new_session(app,
     cookie = client.get_cookie("snug_shopper", path="/api/shopper")
 
     returning = app.test_client()
-    assert returning.get("/api/shopper").get_json() == {"wishlist": [], "cart": []}
+    assert returning.get("/api/shopper").get_json() == EMPTY
     returning.set_cookie("snug_shopper", cookie.value, path="/api/shopper")
     state = returning.get("/api/shopper").get_json()
     assert state["wishlist"] == [choice["id"]]
     assert [(line["productId"], line["quantity"]) for line in state["cart"]] == [(sized["id"], 3)]
     # The cookie can't be edited into someone else's cart.
     returning.set_cookie("snug_shopper", cookie.value[:-3] + "abc", path="/api/shopper")
-    assert returning.get("/api/shopper").get_json() == {"wishlist": [], "cart": []}
+    assert returning.get("/api/shopper").get_json() == EMPTY
 
 
 def test_cart_line_outlives_a_sold_out_change_but_not_a_hidden_or_deleted_product(admin):
@@ -260,6 +262,45 @@ def test_cart_line_outlives_a_sold_out_change_but_not_a_hidden_or_deleted_produc
 
     client.patch(f"/api/admin/products/{pid[1:]}", json={"published": False}, headers=HEADERS)
     assert client.get("/api/shopper").get_json()["cart"] == []
+
+
+def test_bag_carries_current_prices_and_availability(admin):
+    client = admin
+    pid = public_id(client, "green-tracksuit")
+    product = next(p for p in client.get("/api/catalog").get_json()["products"] if p["id"] == pid)
+    client.post("/api/shopper/cart", json={"productId": pid, "color": product["colors"][0]["name"]}, headers=SHOP)
+
+    client.patch(f"/api/admin/products/{pid[1:]}", json={"priceKES": 6100, "availability": "low-stock"}, headers=HEADERS)
+    state = client.get("/api/shopper").get_json()
+    assert state["products"][pid] == {
+        "id": pid, "slug": "green-tracksuit", "name": product["name"], "priceKES": 6100,
+        "availability": "low-stock", "madeToOrder": product["madeToOrder"],
+    }
+
+
+def test_check_returns_fresh_order_data_and_leaves_out_hidden_pieces(admin, client):
+    first, second = public_id(admin, "green-tracksuit"), public_id(admin, "kenya-bomber-jacket")
+    admin.patch(f"/api/admin/products/{first[1:]}", json={"priceKES": 7300}, headers=HEADERS)
+    admin.patch(f"/api/admin/products/{second[1:]}", json={"published": False}, headers=HEADERS)
+
+    res = client.get(f"/api/shopper/check?ids={first},{second},nonsense")
+    assert res.status_code == 200
+    assert res.headers["Cache-Control"] == "private, no-store"
+    assert "Set-Cookie" not in res.headers
+    products = res.get_json()["products"]
+    assert list(products) == [first] and products[first]["priceKES"] == 7300
+
+    too_many = ",".join(f"p{i}" for i in range(1, 22))
+    assert client.get(f"/api/shopper/check?ids={too_many}").status_code == 422
+    assert client.get("/api/shopper/check").get_json() == {"products": {}}
+
+
+@pytest.mark.parametrize("bad", ["p" + "9" * 30, "p0", "p01", "p-1", "p1.5", "1", "p١", "P1", "p 1", "%27%20OR%201=1--"])
+def test_malformed_product_ids_are_rejected_cleanly(client, bad):
+    check = client.get(f"/api/shopper/check?ids={bad}")
+    assert check.status_code == 200 and check.get_json() == {"products": {}}
+    assert client.put(f"/api/shopper/wishlist/{bad}", headers=SHOP).status_code == 404
+    assert client.post("/api/shopper/cart", json={"productId": bad}, headers=SHOP).status_code == 404
 
 
 def test_quick_changes_in_order_end_in_the_right_state(shopper):

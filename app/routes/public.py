@@ -32,6 +32,11 @@ def _summary_images(products):
     return [i.id for p in products for i in p.images[:2]]
 
 
+def _loaded_images(products):
+    """Photo rows already fetched with the products, so the registry needn't query them again."""
+    return [i for p in products for i in p.images]
+
+
 @bp.get("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -58,7 +63,7 @@ def catalog():
             "products": [product_json(p) for p in products],
             "categories": [taxonomy_json(c) for c in categories],
             "collections": [taxonomy_json(c) for c in collections],
-            "images": image_registry(image_ids),
+            "images": image_registry(image_ids, loaded=_loaded_images(products)),
         }
     )
 
@@ -79,7 +84,9 @@ def home():
             "newArrivals": [product_summary(p) for p in new_arrivals],
             "hisAndHers": [product_summary(p) for p in pair],
             "categories": [{**taxonomy_json(c), "productCount": counts[c.id]} for c in categories],
-            "images": image_registry(_summary_images(new_arrivals + pair) + [c.image_id for c in categories]),
+            "images": image_registry(
+                _summary_images(new_arrivals + pair) + [c.image_id for c in categories], loaded=_loaded_images(products)
+            ),
         }
     )
 
@@ -95,7 +102,7 @@ def products():
             "products": [product_summary(p) for p in items],
             "categories": [taxonomy_json(c) for c in categories],
             "collections": [taxonomy_json(c) for c in collections],
-            "images": image_registry(_summary_images(items)),
+            "images": image_registry(_summary_images(items), loaded=_loaded_images(items)),
         }
     )
 
@@ -125,6 +132,8 @@ def product_detail(slug):
             "product": product_json(product),
             "category": taxonomy_json(product.category),
             "related": [product_summary(p) for p in related],
-            "images": image_registry([i.id for i in product.images] + _summary_images(related)),
+            "images": image_registry(
+                [i.id for i in product.images] + _summary_images(related), loaded=_loaded_images([product, *related])
+            ),
         }
     )

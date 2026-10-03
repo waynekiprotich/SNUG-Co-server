@@ -35,15 +35,22 @@ def image_meta(image):
     return legacy
 
 
-def image_registry(image_ids):
-    """Metadata for stored images. The client resolves bundled ones."""
+def image_registry(image_ids, loaded=()):
+    """Metadata for stored images. The client resolves bundled ones.
+
+    loaded: image rows the caller already has, so only the others are queried. The database is
+    a network hop away, so each query saved is a round trip saved.
+    """
     ids = {i for i in image_ids if i}
     if not ids:
         return {}
-    rows = ProductImage.query.filter(
-        ProductImage.id.in_(ids), or_(ProductImage.is_upload.is_(True), ProductImage.cloudinary_public_id.isnot(None))
-    ).all()
-    registry = {row.id: image_meta(row) for row in rows}
+    rows = [row for row in loaded if row.id in ids]
+    missing = ids - {row.id for row in rows}
+    if missing:
+        rows += ProductImage.query.filter(
+            ProductImage.id.in_(missing), or_(ProductImage.is_upload.is_(True), ProductImage.cloudinary_public_id.isnot(None))
+        ).all()
+    registry = {row.id: image_meta(row) for row in rows if row.is_upload or row.cloudinary_public_id}
     return {key: meta for key, meta in registry.items() if meta}
 
 
@@ -101,6 +108,18 @@ def product_summary(p):
         "newArrival": p.new_arrival,
         "recency": p.recency,
         "sortOrder": p.sort_order,
+    }
+
+
+def order_check(p):
+    """What an order is checked against right before WhatsApp opens: never cached."""
+    return {
+        "id": f"p{p.id}",
+        "slug": p.slug,
+        "name": p.name,
+        "priceKES": p.price_kes,
+        "availability": p.availability,
+        "madeToOrder": p.made_to_order,
     }
 
 

@@ -117,11 +117,14 @@ Shoppers don't sign in. Their wishlist and cart live in a signed `snug_shopper` 
 
 | Method | Path | |
 | --- | --- | --- |
-| GET | `/api/shopper` | `{wishlist: [id], cart: [{key, productId, color, size, options, quantity}]}` |
+| GET | `/api/shopper` | `{wishlist: [id], cart: [{key, productId, color, size, options, quantity}], products: {id: {slug, name, priceKES, availability, madeToOrder}}}` (every response below has the same shape) |
+| GET | `/api/shopper/check?ids=p1,p2` | `{products: {...}}`: current price and availability of up to 20 pieces; hidden or deleted ones are left out |
 | PUT / DELETE | `/api/shopper/wishlist/<id>` | Save or remove a piece |
 | POST | `/api/shopper/cart` | Add `{productId, color, size, options, quantity}`; same choices add up |
 | PATCH / DELETE | `/api/shopper/cart/<key>` | Change quantity or remove a line |
 | DELETE | `/api/shopper/cart` | Empty the cart |
+
+`/api/shopper` responses are never cached (`private, no-store`), unlike the storefront routes. The site checks an order against them right before WhatsApp opens, so a price or availability from a cached page is never what gets sent.
 
 Writes need `X-Requested-With: snug-shop` (and an allowed `Origin`), like the admin. Responses are `private, no-store`. Checkout is still WhatsApp: the client's bag page sends the whole cart as one message.
 

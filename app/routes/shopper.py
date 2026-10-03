@@ -4,6 +4,7 @@ The cookie holds product ids and choices only. Every read checks them against th
 catalog, so a product that is hidden or deleted drops out on its own.
 """
 
+import re
 import secrets
 
 from flask import Blueprint, current_app, jsonify, request
@@ -11,6 +12,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from ..errors import ApiError, ValidationError
 from ..models import Product
+from ..serializers import order_check
 
 bp = Blueprint("shopper", __name__, url_prefix="/api/shopper")
 
@@ -23,6 +25,14 @@ MAX_TEXT = 60
 # Browsers drop cookies over 4 KB.
 MAX_COOKIE_BYTES = 3800
 UNORDERABLE = {"sold-out", "coming-soon"}
+# A public product id: "p" and an ASCII number small enough for any database integer.
+PUBLIC_ID = re.compile(r"p([1-9][0-9]{0,8})", re.ASCII)
+
+
+def parse_public_id(value):
+    """The database id in a public id ("p12" -> 12), or None for anything else."""
+    match = PUBLIC_ID.fullmatch(value) if isinstance(value, str) else None
+    return int(match.group(1)) if match else None
 
 
 def _serializer():
@@ -75,6 +85,9 @@ def respond(state, changed=False):
                 }
                 for line in cart
             ],
+            # Current name, price and availability of every saved piece, straight from the
+            # database: the bag shows these, and checks them again before an order is sent.
+            "products": {f"p{i}": order_check(products[i]) for i in dict.fromkeys(wishlist + [line["p"] for line in cart])},
         }
     )
     response.headers["Cache-Control"] = "private, no-store"
@@ -98,11 +111,11 @@ def respond(state, changed=False):
 
 def find_product(product_id):
     """A published product from its public id ("p12")."""
-    if isinstance(product_id, str) and product_id[:1] == "p" and product_id[1:].isdigit():
-        product = published([int(product_id[1:])]).get(int(product_id[1:]))
-        if product:
-            return product
-    raise ApiError(404, "That piece isn’t available.")
+    pk = parse_public_id(product_id)
+    product = published([pk]).get(pk) if pk else None
+    if product is None:
+        raise ApiError(404, "That piece isn’t available.")
+    return product
 
 
 def clean_quantity(value):
@@ -149,6 +162,20 @@ def same_choices(line, color, size, options):
 @bp.get("")
 def get_state():
     return respond(load_state())
+
+
+@bp.get("/check")
+def check_products():
+    """Current price and availability of up to MAX_LINES pieces ("?ids=p1,p2"). Never cached, so an
+    order is never sent on a price the CDN or this browser kept. Hidden or deleted pieces are left out."""
+    raw = [i for i in request.args.get("ids", "").split(",") if i]
+    if len(raw) > MAX_LINES:
+        raise ApiError(422, f"Check up to {MAX_LINES} pieces at a time.")
+    ids = [pk for pk in map(parse_public_id, raw) if pk]
+    found = published(ids)
+    response = jsonify({"products": {f"p{i}": order_check(p) for i, p in found.items()}})
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 # ---- Wishlist ------------------------------------------------------------

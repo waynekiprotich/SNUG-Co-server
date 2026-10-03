@@ -287,6 +287,11 @@ def test_catalog_serves_cloudinary_photos_and_the_rollback_switch(app, admin, cl
     assert "f_auto,q_auto,c_limit,w_{w}" in images[legacy_id]["src"]
     assert "c_crop" not in images[legacy_id]["src"]  # already 4:5
     assert "the-black-tracksuit-1" not in images  # not migrated: the client's bundled copy is used
+    # The page-sized routes build the same entries from the photo rows they already loaded.
+    for path in ("/api/products", "/api/home", "/api/products/green-tracksuit"):
+        registry = client.get(path).get_json()["images"]
+        assert registry["green-tracksuit-1"] == images["green-tracksuit-1"], path
+        assert "the-black-tracksuit-1" not in registry, path
 
     app.config["IMAGE_DELIVERY"] = "legacy"
     images = client.get("/api/catalog").get_json()["images"]
